@@ -1,0 +1,33 @@
+---
+- hosts: all
+  become: yes
+  vars:
+    ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
+    audit_profile: |
+      ### AUDITORIA DE COMANDOS
+      HISTSIZE=10000
+      HISTFILESIZE=10000
+      export HISTTIMEFORMAT="%d/%m/%y %T "
+      whoami="$(whoami)@$(echo $SSH_CONNECTION | awk '{print $1}')"
+      export PROMPT_COMMAND='RETRN_VAL=$?;logger -p local3.debug "$whoami [$$]: $(history 1 | sed "s/^[ ]*[0-9]\+[ ]*//" ) [$RETRN_VAL]"'
+      ##
+    rsyslog_conf: "#LOG AUDITORIA DE COMANDOS\nlocal3.*                        /var/log/audit_ssh.log"
+
+  tasks:
+    - name: Add lines to Profile
+      blockinfile:
+        path: "/etc/profile"
+        block: "{{ audit_profile }}"
+        marker: "# {mark} ANSIBLE MANAGED BLOCK"
+      when: audit_profile not in lookup('file', '/etc/profile')
+
+    - name: Edit rsyslog.conf
+      blockinfile:
+        path: "/etc/rsyslog.conf"
+        block: "{{ rsyslog_conf }}"
+        marker: "# {mark} ANSIBLE MANAGED BLOCK"
+      when: rsyslog_conf not in lookup('file', '/etc/rsyslog.conf')
+
+    - name: Restart rsyslog
+      command: systemctl restart rsyslog
+      when: audit_profile not in lookup('file', '/etc/profile') or rsyslog_conf not in lookup('file', '/etc/rsyslog.conf')
