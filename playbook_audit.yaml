@@ -5,15 +5,49 @@
     ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
     audit_profile: |
       ### AUDITORIA DE COMANDOS
+      history -a
       HISTSIZE=10000
       HISTFILESIZE=10000
+      export HISTCONTROL=erasedups
       export HISTTIMEFORMAT="%d/%m/%y %T "
-      whoami="$(whoami)@$(echo $SSH_CONNECTION | awk '{print $1}')"
-      export PROMPT_COMMAND='RETRN_VAL=$?;logger -p local3.debug "$whoami [$$]: $(history 1 | sed "s/^[ ]*[0-9]\+[ ]*//" ) [$RETRN_VAL]"'
+      # Função para obter o IP do cliente SSH
+      get_ssh_client_ip() {
+          if [ -n "$SSH_CONNECTION" ]; then
+              echo "$SSH_CONNECTION" | awk '{print $1}'
+          else
+              echo "Unknown"
+          fi
+      }
+      # Função para obter o nome de usuário atual
+      get_current_username() {
+          if [ -n "$SUDO_USER" ]; then
+              echo "$SUDO_USER"
+          else
+              echo "$(whoami)"
+          fi
+      }
+      export PROMPT_COMMAND='RETRN_VAL=$?; logger -p local3.debug "$(hostname) $(get_current_username) [$$]: $(history 1 | sed "s/^[ ]*[0-9]\+[ ]*//" ) [$RETRN_VAL] from $(get_ssh_client_ip)"| systemd-cat -t ssh_audit -p info'
       ##
     rsyslog_conf: "#LOG AUDITORIA DE COMANDOS\nlocal3.*                        /var/log/audit_ssh.log"
 
   tasks:
+    - name: Check if rsyslog is installed
+      command: which rsyslogd
+      register: rsyslog_installed
+      ignore_errors: true
+
+    - name: Install rsyslog if not installed
+      dnf:
+        name: rsyslog
+        state: present
+      when: rsyslog_installed.rc != 0
+
+    - name: Start rsyslog service
+      service:
+        name: rsyslog
+        state: started
+      when: rsyslog_installed.rc != 0
+
     - name: Add lines to Profile
       blockinfile:
         path: "/etc/profile"
@@ -21,13 +55,56 @@
         marker: "# {mark} ANSIBLE MANAGED BLOCK"
       when: audit_profile not in lookup('file', '/etc/profile')
 
+    - name: Check if rsyslog.conf exists
+      stat:
+        path: "/etc/rsyslog.conf"
+      register: rsyslog_conf_exists
+
     - name: Edit rsyslog.conf
       blockinfile:
         path: "/etc/rsyslog.conf"
         block: "{{ rsyslog_conf }}"
         marker: "# {mark} ANSIBLE MANAGED BLOCK"
-      when: rsyslog_conf not in lookup('file', '/etc/rsyslog.conf')
+      when:
+        - rsyslog_installed.rc == 0
+        - rsyslog_conf_exists.stat.exists
+        - rsyslog_conf not in lookup('file', '/etc/rsyslog.conf')
 
     - name: Restart rsyslog
       command: systemctl restart rsyslog
-      when: audit_profile not in lookup('file', '/etc/profile') or rsyslog_conf not in lookup('file', '/etc/rsyslog.conf')
+      when:
+        - rsyslog_installed.rc == 0
+        - rsyslog_conf_exists.stat.exists
+        - (audit_profile not in lookup('file', '/etc/profile') or rsyslog_conf not in lookup('file', '/etc/rsyslog.conf'))
+
+  handlers:
+    - name: debug_installing_rsyslog
+      debug:
+        msg: "Instalando o rsyslog."
+      when: rsyslog_installed.rc != 0
+
+    - name: debug_starting_rsyslog_service
+      debug:
+        msg: "Iniciando o serviço rsyslog."
+      when: rsyslog_installed.rc != 0
+
+    - name: debug_adding_lines_to_profile
+      debug:
+        msg: "Adicionando linhas ao arquivo /etc/profile."
+      when: audit_profile not in lookup('file', '/etc/profile')
+
+    - name: debug_editing_rsyslog_conf
+      debug:
+        msg: "Editando o arquivo /etc/rsyslog.conf."
+      when:
+        - rsyslog_installed.rc == 0
+        - rsyslog_conf_exists.stat.exists
+        - rsyslog_conf not in lookup('file', '/etc/rsyslog.conf')
+
+    - name: debug_restarting_rsyslog
+      debug:
+        msg: "Reiniciando o serviço rsyslog."
+      when:
+        - rsyslog_installed.rc == 0
+        - rsyslog_conf_exists.stat.exists
+        - (audit_profile not in lookup('file', '/etc/profile') or rsyslog_conf not in lookup('file', '/etc/rsyslog.conf'))
